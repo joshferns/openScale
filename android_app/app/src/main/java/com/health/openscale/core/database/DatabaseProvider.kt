@@ -305,10 +305,10 @@ class DatabaseProvider : ContentProvider() {
                         val typesByKey = allMeasurementTypes.associateBy { it.key.name }
                         val typesById = allMeasurementTypes.associateBy { it.id }
                         val existingTypeIds = measurementValuesToInsert.mapTo(HashSet()) { it.typeId }
-                        GenericValueJson.parse(valuesJson, typesByKey, typesById).forEach { (type, parsedValue) ->
-                            if (type.id !in existingTypeIds) {
-                                measurementValuesToInsert.add(parsedValue)
-                                existingTypeIds.add(type.id)
+                        GenericValueJson.parse(valuesJson, typesByKey, typesById).forEach { (typeId, v) ->
+                            if (typeId !in existingTypeIds) {
+                                measurementValuesToInsert.add(MeasurementValue(measurementId = 0, typeId = typeId, floatValue = v))
+                                existingTypeIds.add(typeId)
                             }
                         }
                     }
@@ -503,27 +503,21 @@ class DatabaseProvider : ContentProvider() {
                                 if (values.containsKey(MeasurementColumns.WATER)) typeMap[MeasurementTypeKey.WATER]?.id?.let(::add)
                                 if (values.containsKey(MeasurementColumns.MUSCLE)) typeMap[MeasurementTypeKey.MUSCLE]?.id?.let(::add)
                             }
-                            GenericValueJson.parse(valuesJson, typesByKey, typesById).forEach { (type, parsedValue) ->
-                                if (type.id in handledTypeIds) return@forEach
-                                val existingValue = existingMeasurementWithValues.values.find { it.type.id == type.id }
+                            GenericValueJson.parse(valuesJson, typesByKey, typesById).forEach { (typeId, userValue) ->
+                                if (typeId in handledTypeIds) return@forEach
+                                val existingValue = existingMeasurementWithValues.values.find { it.type.id == typeId }
                                 if (existingValue != null) {
-                                    // Compare whole rows: the payload field differs per input type,
-                                    // and the parsed value is already in its stored form.
-                                    val updated = parsedValue.copy(
-                                        id = existingValue.value.id,
-                                        measurementId = existingValue.value.measurementId,
-                                    )
-                                    if (updated != existingValue.value) {
-                                        databaseRepository.updateMeasurementValue(updated)
+                                    if (existingValue.value.floatValue != userValue) {
+                                        databaseRepository.updateMeasurementValue(existingValue.value.copy(floatValue = userValue))
                                         anyChangeMade = true
-                                        LogManager.d(TAG, "Updated typeId=${type.id} for measurement ${measurementToUpdate.id} (values_json)")
+                                        LogManager.d(TAG, "Updated typeId=$typeId for measurement ${measurementToUpdate.id} to $userValue (values_json)")
                                     }
                                 } else {
                                     databaseRepository.insertMeasurementValue(
-                                        parsedValue.copy(measurementId = measurementToUpdate.id)
+                                        MeasurementValue(measurementId = measurementToUpdate.id, typeId = typeId, floatValue = userValue)
                                     )
                                     anyChangeMade = true
-                                    LogManager.d(TAG, "Inserted typeId=${type.id} for measurement ${measurementToUpdate.id} (values_json)")
+                                    LogManager.d(TAG, "Inserted typeId=$typeId for measurement ${measurementToUpdate.id} = $userValue (values_json)")
                                 }
                             }
                         }
