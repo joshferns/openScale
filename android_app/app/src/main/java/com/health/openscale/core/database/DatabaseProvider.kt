@@ -158,10 +158,16 @@ class DatabaseProvider : ContentProvider() {
                             databaseRepository.getMeasurementsWithValuesForUser(userIdFromUri).first()
 
                         // The self-describing generic value set (values_json) is the single source of
-                        // truth; the sync app derives weight/fat/water/muscle from it.
+                        // truth; the sync app derives weight/fat/water/muscle from it. The fixed
+                        // weight/fat/water/muscle columns are still included by default alongside it
+                        // so sync clients built before values_json existed keep working.
                         val defaultMeasurementProjection = arrayOf(
                             MeasurementColumns._ID,
                             MeasurementColumns.DATETIME,
+                            MeasurementColumns.WEIGHT,
+                            MeasurementColumns.BODY_FAT,
+                            MeasurementColumns.WATER,
+                            MeasurementColumns.MUSCLE,
                             MeasurementColumns.VALUES_JSON
                         )
                         val currentProjection = projection ?: defaultMeasurementProjection
@@ -172,6 +178,17 @@ class DatabaseProvider : ContentProvider() {
                             val rowData = mutableListOf<Any?>()
                             if (currentProjection.contains(MeasurementColumns._ID)) rowData.add(measurement.id)
                             if (currentProjection.contains(MeasurementColumns.DATETIME)) rowData.add(measurement.timestamp)
+                            if (currentProjection.contains(MeasurementColumns.WEIGHT) ||
+                                currentProjection.contains(MeasurementColumns.BODY_FAT) ||
+                                currentProjection.contains(MeasurementColumns.WATER) ||
+                                currentProjection.contains(MeasurementColumns.MUSCLE)
+                            ) {
+                                val legacyRow = LegacyMeasurementColumns.derive(mcv.values)
+                                if (currentProjection.contains(MeasurementColumns.WEIGHT)) rowData.add(legacyRow.weightKg)
+                                if (currentProjection.contains(MeasurementColumns.BODY_FAT)) rowData.add(legacyRow.fatPercent)
+                                if (currentProjection.contains(MeasurementColumns.WATER)) rowData.add(legacyRow.waterPercent)
+                                if (currentProjection.contains(MeasurementColumns.MUSCLE)) rowData.add(legacyRow.musclePercent)
+                            }
                             if (currentProjection.contains(MeasurementColumns.VALUES_JSON)) {
                                 val typesById = mcv.values.associate { it.type.id to it.type }
                                 val rawValues = mcv.values.map { it.value }
@@ -288,10 +305,10 @@ class DatabaseProvider : ContentProvider() {
                         val typesByKey = allMeasurementTypes.associateBy { it.key.name }
                         val typesById = allMeasurementTypes.associateBy { it.id }
                         val existingTypeIds = measurementValuesToInsert.mapTo(HashSet()) { it.typeId }
-                        GenericValueJson.parse(valuesJson, typesByKey, typesById).forEach { (typeId, v) ->
-                            if (typeId !in existingTypeIds) {
-                                measurementValuesToInsert.add(MeasurementValue(measurementId = 0, typeId = typeId, floatValue = v))
-                                existingTypeIds.add(typeId)
+                        GenericValueJson.parse(valuesJson, typesByKey, typesById).forEach { (type, parsedValue) ->
+                            if (type.id !in existingTypeIds) {
+                                measurementValuesToInsert.add(parsedValue)
+                                existingTypeIds.add(type.id)
                             }
                         }
                     }
@@ -486,21 +503,27 @@ class DatabaseProvider : ContentProvider() {
                                 if (values.containsKey(MeasurementColumns.WATER)) typeMap[MeasurementTypeKey.WATER]?.id?.let(::add)
                                 if (values.containsKey(MeasurementColumns.MUSCLE)) typeMap[MeasurementTypeKey.MUSCLE]?.id?.let(::add)
                             }
-                            GenericValueJson.parse(valuesJson, typesByKey, typesById).forEach { (typeId, userValue) ->
-                                if (typeId in handledTypeIds) return@forEach
-                                val existingValue = existingMeasurementWithValues.values.find { it.type.id == typeId }
+                            GenericValueJson.parse(valuesJson, typesByKey, typesById).forEach { (type, parsedValue) ->
+                                if (type.id in handledTypeIds) return@forEach
+                                val existingValue = existingMeasurementWithValues.values.find { it.type.id == type.id }
                                 if (existingValue != null) {
-                                    if (existingValue.value.floatValue != userValue) {
-                                        databaseRepository.updateMeasurementValue(existingValue.value.copy(floatValue = userValue))
+                                    // Compare whole rows: the payload field differs per input type,
+                                    // and the parsed value is already in its stored form.
+                                    val updated = parsedValue.copy(
+                                        id = existingValue.value.id,
+                                        measurementId = existingValue.value.measurementId,
+                                    )
+                                    if (updated != existingValue.value) {
+                                        databaseRepository.updateMeasurementValue(updated)
                                         anyChangeMade = true
-                                        LogManager.d(TAG, "Updated typeId=$typeId for measurement ${measurementToUpdate.id} to $userValue (values_json)")
+                                        LogManager.d(TAG, "Updated typeId=${type.id} for measurement ${measurementToUpdate.id} (values_json)")
                                     }
                                 } else {
                                     databaseRepository.insertMeasurementValue(
-                                        MeasurementValue(measurementId = measurementToUpdate.id, typeId = typeId, floatValue = userValue)
+                                        parsedValue.copy(measurementId = measurementToUpdate.id)
                                     )
                                     anyChangeMade = true
-                                    LogManager.d(TAG, "Inserted typeId=$typeId for measurement ${measurementToUpdate.id} = $userValue (values_json)")
+                                    LogManager.d(TAG, "Inserted typeId=${type.id} for measurement ${measurementToUpdate.id} (values_json)")
                                 }
                             }
                         }
